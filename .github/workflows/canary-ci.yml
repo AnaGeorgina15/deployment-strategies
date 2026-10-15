@@ -1,39 +1,114 @@
-- name: Promote and rollback
-      run: |
+
+name: Canary lab CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-canary:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: demo_canary/canary_lab
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fix script permissions
+        run: chmod +x scripts/*.sh
+
+      - name: Unit tests
+        run: node --test test/*.test.js
+
+      - name: Start two releases and proxy
+        run: |
+          cp .env.example .env
+          docker compose up -d --build
+          docker compose ps
+
+      - name: Wait for HTTP readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health; then
+              echo "Servicio disponible"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+
+      - name: Validate canary routing
+        run: |
+          ./scripts/promote.sh canary10
+          ./scripts/sample.sh 100 | tee /tmp/distribution.txt
+          grep -q '"version":"v1"' /tmp/distribution.txt
+          grep -q '"version":"v2"' /tmp/distribution.txt
+          echo "Ambas versiones reciben solicitudes"
+
+      - name: Promote and rollback
+        run: |
           ./scripts/promote.sh green
 
           echo "Verificando que Green responda..."
+          green_ok=false
+
           for i in $(seq 1 15); do
             response=$(curl -fsS http://127.0.0.1:8080/api/info) || true
             echo "Intento $i: $response"
 
             if echo "$response" | grep -q '"version":"v2"'; then
-              echo "Green activada correctamente"
+              green_ok=true
               break
-            fi
-
-            if [ "$i" -eq 15 ]; then
-              echo "Error: Green no respondió correctamente"
-              exit 1
             fi
 
             sleep 2
           done
 
+          if [ "$green_ok" != "true" ]; then
+            echo "Error: Green no respondio correctamente"
+            exit 1
+          fi
+
+          echo "Green activada correctamente"
+
           ./scripts/promote.sh blue
 
           echo "Verificando rollback hacia Blue..."
+          blue_ok=false
+
           for i in $(seq 1 15); do
             response=$(curl -fsS http://127.0.0.1:8080/api/info) || true
             echo "Intento $i: $response"
 
             if echo "$response" | grep -q '"version":"v1"'; then
-              echo "Rollback realizado correctamente"
-              exit 0
+              blue_ok=true
+              break
             fi
 
             sleep 2
           done
 
-          echo "Error: el rollback no se verificó"
-          exit 1
+          if [ "$blue_ok" != "true" ]; then
+            echo "Error: el rollback no se verifico"
+            exit 1
+          fi
+
+          echo "Rollback realizado correctamente"
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
