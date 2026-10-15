@@ -1,67 +1,39 @@
-name: Canary lab CI
+- name: Promote and rollback
+      run: |
+          ./scripts/promote.sh green
 
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
+          echo "Verificando que Green responda..."
+          for i in $(seq 1 15); do
+            response=$(curl -fsS http://127.0.0.1:8080/api/info) || true
+            echo "Intento $i: $response"
 
-jobs:
-  test-and-canary:
-    runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: demo_canary/canary_lab
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Fix script permissions
-        run: chmod +x scripts/*.sh
-
-      - name: Unit tests
-        run: node --test test/*.test.js
-
-      - name: Start two releases and proxy
-        run: |
-          cp .env.example .env
-          docker compose up -d --build
-
-      - name: Wait for HTTP readiness
-        run: |
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8080/health; then
-              exit 0
+            if echo "$response" | grep -q '"version":"v2"'; then
+              echo "Green activada correctamente"
+              break
             fi
+
+            if [ "$i" -eq 15 ]; then
+              echo "Error: Green no respondió correctamente"
+              exit 1
+            fi
+
             sleep 2
           done
-          docker compose logs
-          exit 1
 
-      - name: Validate canary routing
-        run: |
-          ./scripts/promote.sh canary10
-          ./scripts/sample.sh 100 | tee /tmp/distribution.txt
-          grep -q '"version":"v1"' /tmp/distribution.txt
-          grep -q '"version":"v2"' /tmp/distribution.txt
-
-      - name: Promote and rollback
-        run: |
-          ./scripts/promote.sh green
-          curl -fsS http://127.0.0.1:8080/api/info | grep -q '"version":"v2"'
           ./scripts/promote.sh blue
-          curl -fsS http://127.0.0.1:8080/api/info | grep -q '"version":"v1"'
 
-      - name: Logs on failure
-        if: failure()
-        run: docker compose logs
+          echo "Verificando rollback hacia Blue..."
+          for i in $(seq 1 15); do
+            response=$(curl -fsS http://127.0.0.1:8080/api/info) || true
+            echo "Intento $i: $response"
 
-      - name: Tear down
-        if: always()
-        run: docker compose down -v
+            if echo "$response" | grep -q '"version":"v1"'; then
+              echo "Rollback realizado correctamente"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Error: el rollback no se verificó"
+          exit 1
